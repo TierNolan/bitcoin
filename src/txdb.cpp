@@ -96,6 +96,14 @@ bool CBlockTreeDB::ReadReindexing(bool &fReindexing) {
     return true;
 }
 
+bool CBlockTreeDB::WriteETXReindexStarted(bool fETXReindexStarted) {
+    return WriteFlag("etx_reindex_started", fETXReindexStarted);
+}
+
+bool CBlockTreeDB::ReadETXReindexStarted(bool &fETXReindexStarted) {
+    return ReadFlag("etx_reindex_started", fETXReindexStarted);
+}
+
 bool CBlockTreeDB::ReadLastBlockFile(int &nFile) {
     return Read(DB_LAST_BLOCK, nFile);
 }

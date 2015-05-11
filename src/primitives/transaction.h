@@ -9,6 +9,7 @@
 #include "amount.h"
 #include "script/script.h"
 #include "serialize.h"
+#include "version.h"
 #include "uint256.h"
 
 /** An outpoint - a combination of a transaction hash and an index n into its vout */
@@ -17,6 +18,11 @@ class COutPoint
 public:
     uint256 hash;
     uint32_t n;
+    CAmount nValue;    
+    unsigned char cUTXOType;
+    CScript scriptPubKey;
+    uint32_t nMinimumHeight;
+    bool fValidated;
 
     COutPoint() { SetNull(); }
     COutPoint(uint256 hashIn, uint32_t nIn) { hash = hashIn; n = nIn; }
@@ -27,9 +33,25 @@ public:
     inline void SerializationOp(Stream& s, Operation ser_action, int nType, int nVersion) {
         READWRITE(hash);
         READWRITE(n);
+        if (nType & SER_NETWORK && nVersion >= ETX_VERSION) {
+            READWRITE(nValue);
+            READWRITE(cUTXOType);
+            READWRITE(scriptPubKey);
+            READWRITE(nMinimumHeight);
+        }
     }
 
-    void SetNull() { hash.SetNull(); n = (uint32_t) -1; }
+    void SetNull() 
+    { 
+        hash.SetNull(); 
+        n = (uint32_t) -1; 
+        nValue = -1;
+        cUTXOType = 0;
+        scriptPubKey.clear();
+        nMinimumHeight = 0;
+        fValidated = false;
+    }
+
     bool IsNull() const { return (hash.IsNull() && n == (uint32_t) -1); }
 
     friend bool operator<(const COutPoint& a, const COutPoint& b)

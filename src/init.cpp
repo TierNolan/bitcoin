@@ -486,6 +486,23 @@ void DeleteAllBlockFiles()
     }
 }
 
+// The original undo files do not contain sufficient information to support the extended
+// transaction format.  By deleting them and then forcing a reindex, they are regenerated
+// with the additional information.
+void DeleteAllUndoFiles()
+{
+    LogPrintf("Removing all rev?????.dat files and reindexing to generate extended undo information\n");
+    boost::filesystem::path blocksdir = GetDataDir() / "blocks";
+    for (boost::filesystem::directory_iterator it(blocksdir); it != boost::filesystem::directory_iterator(); it++) {
+        if (is_regular_file(*it)) {
+            if ((it->path().filename().string().length() == 12) &&
+                (it->path().filename().string().substr(8,4) == ".dat") &&
+                (it->path().filename().string().substr(0,3) == "rev"))
+                boost::filesystem::remove(it->path());
+        }
+    }
+}
+
 void ThreadImport(std::vector<boost::filesystem::path> vImportFiles)
 {
     RenameThread("bitcoin-loadblk");
@@ -1086,6 +1103,22 @@ bool AppInit2(boost::thread_group& threadGroup)
                 delete pblocktree;
 
                 pblocktree = new CBlockTreeDB(nBlockTreeDBCache, false, fReindex);
+
+                bool fETXReindexStarted = false;
+
+                pblocktree->ReadETXReindexStarted(fETXReindexStarted);
+
+                if (!fETXReindexStarted) {
+                    // Close the database and reopen with the wipe flag set
+                    delete pblocktree;
+                    pblocktree = new CBlockTreeDB(nBlockTreeDBCache, false, true);
+                    DeleteAllUndoFiles();
+                    fReindex = true;
+                    // Set ETX state as reindexing
+                    // This prevents the undo files and database from being deleted every restart
+                    pblocktree->WriteETXReindexStarted(true);
+                }
+
                 pcoinsdbview = new CCoinsViewDB(nCoinDBCache, false, fReindex);
                 pcoinscatcher = new CCoinsViewErrorCatcher(pcoinsdbview);
                 pcoinsTip = new CCoinsViewCache(pcoinscatcher);
