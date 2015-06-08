@@ -142,6 +142,8 @@ extern uint64_t nLocalServices;
 extern uint64_t nLocalHostNonce;
 extern CAddrMan addrman;
 extern int nMaxConnections;
+extern int64_t nMaxSendBytesPerSecond;
+extern int64_t nMaxGlobalBytesPerSecond;
 
 extern std::vector<CNode*> vNodes;
 extern CCriticalSection cs_vNodes;
@@ -625,9 +627,10 @@ public:
 
     static uint64_t GetTotalBytesRecv();
     static uint64_t GetTotalBytesSent();
+
+    static bool CheckLowBandwidth(int percent);
+    static float GetBandwidthPercent();
 };
-
-
 
 class CTransaction;
 void RelayTransaction(const CTransaction& tx);

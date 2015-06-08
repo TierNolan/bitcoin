@@ -363,7 +363,8 @@ UniValue getnettotals(const UniValue& params, bool fHelp)
             "{\n"
             "  \"totalbytesrecv\": n,   (numeric) Total bytes received\n"
             "  \"totalbytessent\": n,   (numeric) Total bytes sent\n"
-            "  \"timemillis\": t        (numeric) Total cpu time\n"
+            "  \"timemillis\": t,       (numeric) Total cpu time\n"
+            "  \"tokenbucket\": n       (numeric) Bandwidth remaining (percent)\n"
             "}\n"
             "\nExamples:\n"
             + HelpExampleCli("getnettotals", "")
@@ -374,6 +375,7 @@ UniValue getnettotals(const UniValue& params, bool fHelp)
     obj.push_back(Pair("totalbytesrecv", CNode::GetTotalBytesRecv()));
     obj.push_back(Pair("totalbytessent", CNode::GetTotalBytesSent()));
     obj.push_back(Pair("timemillis", GetTimeMillis()));
+    obj.push_back(Pair("tokenbucket", CNode::GetBandwidthPercent()));
     return obj;
 }
 

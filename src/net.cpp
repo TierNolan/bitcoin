@@ -64,6 +64,78 @@ namespace {
     };
 }
 
+class CTokenBucket
+{
+private:
+    int64_t nWindowSeconds;
+    int64_t nBytesPerSecond;
+    int64_t nSizeBytes;
+    int64_t nBytesStored;
+    int64_t nLastTime;
+    int nLastPercent;
+public:
+    CTokenBucket(int64_t nWindowSeconds, int64_t nBytesPerSecond)
+        : nWindowSeconds(nWindowSeconds), nBytesPerSecond(nBytesPerSecond)
+    {
+        nSizeBytes = nWindowSeconds * nBytesPerSecond;
+        nBytesStored = nSizeBytes / 4;
+        nLastTime = GetTime();
+        nLastPercent = 0;
+    }
+
+    void Update()
+    {
+        int64_t nNow = GetTime();
+        if (nNow <= nLastTime)
+            return;
+
+        nBytesStored += (nNow - nLastTime) * nBytesPerSecond;
+
+        nLastTime = nNow;
+
+        if (nBytesStored > nSizeBytes)
+            nBytesStored = nSizeBytes;
+    }
+
+    void PrintPercentOnChange(int step)
+    {
+        if (nBytesPerSecond <= 0)
+            return;
+
+        int percent = GetStored(100);
+        if (std::abs(percent - nLastPercent) >= step)
+        {
+            LogPrintf("Daily bandwidth token bucket %d%% full\n", percent);
+            nLastPercent = percent;
+        }
+    }
+
+    bool ConsumeBytes(int64_t bytes)
+    {
+        nBytesStored -= bytes;
+        return !IsThrottled();
+    }
+
+    bool IsThrottled()
+    {
+        return nBytesPerSecond > 0 && nBytesStored < 0;
+    }
+
+    float GetStored()
+    {
+        if (nSizeBytes <= 0)
+            return 1.0;
+        else
+            return ((float) nBytesStored) / nSizeBytes;
+    }
+
+    int GetStored(int64_t scale)
+    {
+        return GetStored() * scale;
+    }
+
+};
+
 //
 // Global state variables
 //
@@ -79,6 +151,8 @@ uint64_t nLocalHostNonce = 0;
 static std::vector<ListenSocket> vhListenSocket;
 CAddrMan addrman;
 int nMaxConnections = 125;
+int64_t nMaxSendBytesPerSecond = -1;
+int64_t nMaxGlobalBytesPerSecond = -1;
 bool fAddressesInitialized = false;
 
 vector<CNode*> vNodes;
@@ -112,6 +186,13 @@ void AddOneShot(const std::string& strDest)
     LOCK(cs_vOneShots);
     vOneShots.push_back(strDest);
 }
+
+CCriticalSection cs_tokenBucket;
+CTokenBucket *pSendTokenBucket = NULL;
+CTokenBucket *pGlobalTokenBucket = NULL;
+
+void UpdateTokenBuckets();
+bool IsThrottled();
 
 unsigned short GetListenPort()
 {
@@ -674,6 +755,9 @@ void SocketSendData(CNode *pnode)
 {
     std::deque<CSerializeData>::iterator it = pnode->vSendMsg.begin();
 
+    if (IsThrottled())
+        return;
+
     while (it != pnode->vSendMsg.end()) {
         const CSerializeData &data = *it;
         assert(data.size() > pnode->nSendOffset);
@@ -691,6 +775,8 @@ void SocketSendData(CNode *pnode)
                 // could not send full message; stop sending more
                 break;
             }
+            if (IsThrottled())
+                break;
         } else {
             if (nBytes < 0) {
                 // error
@@ -832,7 +918,7 @@ void ThreadSocketHandler()
                 // * We process a message in the buffer (message handler thread).
                 {
                     TRY_LOCK(pnode->cs_vSend, lockSend);
-                    if (lockSend && !pnode->vSendMsg.empty()) {
+                    if (lockSend && !pnode->vSendMsg.empty() && !IsThrottled()) {
                         FD_SET(pnode->hSocket, &fdsetSend);
                         continue;
                     }
@@ -929,6 +1015,7 @@ void ThreadSocketHandler()
             BOOST_FOREACH(CNode* pnode, vNodesCopy)
                 pnode->AddRef();
         }
+        UpdateTokenBuckets();
         BOOST_FOREACH(CNode* pnode, vNodesCopy)
         {
             boost::this_thread::interruption_point();
@@ -1794,14 +1881,30 @@ void RelayTransaction(const CTransaction& tx, const CDataStream& ss)
 
 void CNode::RecordBytesRecv(uint64_t bytes)
 {
-    LOCK(cs_totalBytesRecv);
-    nTotalBytesRecv += bytes;
+    {
+        LOCK(cs_totalBytesRecv);
+        nTotalBytesRecv += bytes;
+    }
+    {
+        LOCK(cs_tokenBucket);
+        if (pGlobalTokenBucket != NULL)
+            pGlobalTokenBucket->ConsumeBytes(bytes);
+    }
 }
 
 void CNode::RecordBytesSent(uint64_t bytes)
 {
-    LOCK(cs_totalBytesSent);
-    nTotalBytesSent += bytes;
+    {
+        LOCK(cs_totalBytesSent);
+        nTotalBytesSent += bytes;
+    }
+    {
+        LOCK(cs_tokenBucket);
+        if (pGlobalTokenBucket != NULL)
+            pGlobalTokenBucket->ConsumeBytes(bytes);
+        if (pSendTokenBucket != NULL)
+            pSendTokenBucket->ConsumeBytes(bytes);
+    }
 }
 
 uint64_t CNode::GetTotalBytesRecv()
@@ -1814,6 +1917,41 @@ uint64_t CNode::GetTotalBytesSent()
 {
     LOCK(cs_totalBytesSent);
     return nTotalBytesSent;
+}
+
+bool CNode::CheckLowBandwidth(int percent)
+{
+    LOCK(cs_tokenBucket);
+    if (pGlobalTokenBucket == NULL)
+        return false;
+    return pGlobalTokenBucket->GetStored(100) <= percent;
+}
+
+float CNode::GetBandwidthPercent()
+{
+    LOCK(cs_tokenBucket);
+    if (pGlobalTokenBucket == NULL)
+        return 100.0;
+    return pGlobalTokenBucket->GetStored() * 100;
+}
+
+void UpdateTokenBuckets()
+{
+    LOCK(cs_tokenBucket);
+    if (pSendTokenBucket == NULL)
+        pSendTokenBucket = new CTokenBucket(2, nMaxSendBytesPerSecond);
+    if (pGlobalTokenBucket == NULL)
+        pGlobalTokenBucket = new CTokenBucket(60 * 60 * 24 * 2, nMaxGlobalBytesPerSecond);
+    pSendTokenBucket->Update();
+    pGlobalTokenBucket->Update();
+    pGlobalTokenBucket->PrintPercentOnChange(1);
+}
+
+bool IsThrottled()
+{
+    LOCK(cs_tokenBucket);
+    return (pSendTokenBucket != NULL && pSendTokenBucket->IsThrottled()) ||
+        (pGlobalTokenBucket != NULL && pGlobalTokenBucket->IsThrottled());
 }
 
 void CNode::Fuzz(int nChance)

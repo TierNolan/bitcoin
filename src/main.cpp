@@ -2413,10 +2413,32 @@ bool ActivateBestChain(CValidationState &state, CBlock *pblock) {
             // Don't relay blocks if pruning -- could cause a peer to try to download, resulting
             // in a stalled download if the block file is pruned before the request.
             if (nLocalServices & NODE_NETWORK) {
-                LOCK(cs_vNodes);
-                BOOST_FOREACH(CNode* pnode, vNodes)
-                    if (chainActive.Height() > (pnode->nStartingHeight != -1 ? pnode->nStartingHeight - 2000 : nBlockEstimate))
-                        pnode->PushInventory(CInv(MSG_BLOCK, hashNewTip));
+                static uint256 hashBlockQueued;
+                uint256 hashBlockPopped;
+                bool lowBandwidth = CNode::CheckLowBandwidth(25);
+                if (lowBandwidth) {
+                    // Queue inv message for block relay.  This delays the relay until the next block is received
+                    // All peers are likely to receive the update from a different peer within that time
+                    // If a peer is isolated except for the connection to this peer, it will only be one block behind
+                    // the network.
+                    if (!hashBlockQueued.IsNull())
+                        LogPrintf("Block %s not relayed due to low bandwidth, sending queued block %s instead\n", 
+                            hashNewTip.ToString(), hashBlockQueued.ToString());
+                    else
+                        LogPrintf("Block %s not relayed due to low bandwidth, adding to queue\n", hashNewTip.ToString());
+                    hashBlockPopped = hashBlockQueued;
+                    hashBlockQueued = hashNewTip;
+                } else {
+                    // No delay when not low on bandwidth
+                    hashBlockQueued.SetNull();
+                    hashBlockPopped = hashNewTip;
+                }
+                if (!hashBlockPopped.IsNull()) {
+                    LOCK(cs_vNodes);
+                    BOOST_FOREACH(CNode* pnode, vNodes)
+                        if (chainActive.Height() > (pnode->nStartingHeight != -1 ? pnode->nStartingHeight - 2000 : nBlockEstimate))
+                            pnode->PushInventory(CInv(MSG_BLOCK, hashNewTip));
+                }
             }
             // Notify external listeners about the new tip.
             uiInterface.NotifyBlockTip(hashNewTip);
@@ -3827,7 +3849,9 @@ void static ProcessGetData(CNode* pfrom)
                 BlockMap::iterator mi = mapBlockIndex.find(inv.hash);
                 if (mi != mapBlockIndex.end())
                 {
-                    if (chainActive.Contains(mi->second)) {
+                    bool lowBandwidth = CNode::CheckLowBandwidth(25);
+                    bool onActiveChain = chainActive.Contains(mi->second);
+                    if (!lowBandwidth && onActiveChain) {
                         send = true;
                     } else {
                         static const int nOneMonth = 30 * 24 * 60 * 60;
@@ -3838,7 +3862,10 @@ void static ProcessGetData(CNode* pfrom)
                             (pindexBestHeader->GetBlockTime() - mi->second->GetBlockTime() < nOneMonth) &&
                             (GetBlockProofEquivalentTime(*pindexBestHeader, *mi->second, *pindexBestHeader, Params().GetConsensus()) < nOneMonth);
                         if (!send) {
-                            LogPrintf("%s: ignoring request from peer=%i for old block that isn't in the main chain\n", __func__, pfrom->GetId());
+                            if (!onActiveChain)
+                                LogPrintf("%s: ignoring request from peer=%i for old block that isn't in the main chain\n", __func__, pfrom->GetId());
+                            else
+                                LogPrintf("%s: ignoring request from peer=%i for old block due to low bandwidth\n", __func__, pfrom->GetId());
                         }
                     }
                 }
@@ -4342,7 +4369,9 @@ bool static ProcessMessage(CNode* pfrom, string strCommand, CDataStream& vRecv, 
         if (AcceptToMemoryPool(mempool, state, tx, true, &fMissingInputs))
         {
             mempool.check(pcoinsTip);
-            RelayTransaction(tx);
+            bool lowBandwidth = CNode::CheckLowBandwidth(25);
+            if (!lowBandwidth)
+                RelayTransaction(tx);
             vWorkQueue.push_back(inv.hash);
 
             LogPrint("mempool", "AcceptToMemoryPool: peer=%d %s: accepted %s (poolsz %u)\n",
@@ -4376,7 +4405,8 @@ bool static ProcessMessage(CNode* pfrom, string strCommand, CDataStream& vRecv, 
                     if (AcceptToMemoryPool(mempool, stateDummy, orphanTx, true, &fMissingInputs2))
                     {
                         LogPrint("mempool", "   accepted orphan tx %s\n", orphanHash.ToString());
-                        RelayTransaction(orphanTx);
+                        if (!lowBandwidth)
+                            RelayTransaction(orphanTx);
                         vWorkQueue.push_back(orphanHash);
                         vEraseQueue.push_back(orphanHash);
                     }
